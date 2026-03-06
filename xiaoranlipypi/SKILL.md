@@ -1,9 +1,9 @@
 ---
-name: main-first-xr-branch-sync
+name: xiaoranlipypi
 description: Use when maintaining a long-lived customization branch that must continuously absorb upstream main changes, minimize rebase conflicts, and isolate branch-only behavior into xr-prefixed files.
 ---
 
-# Main-First XR Branch Sync
+# xiaoranlipypi
 
 ## Overview
 Treat `main` as the source of truth and keep the customization branch as a thin overlay. Prefer adding `xr*` files over modifying shared upstream files.

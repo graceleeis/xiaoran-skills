@@ -1,0 +1,4 @@
+interface:
+  display_name: "xiaoranlipypi"
+  short_description: "Keep custom branch synced with main safely"
+  default_prompt: "Use $xiaoranlipypi to sync my customization branch from main while isolating custom edits in xr-prefixed files."

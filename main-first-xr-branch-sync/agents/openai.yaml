@@ -1,4 +1,0 @@
-interface:
-  display_name: "Main-First XR Sync"
-  short_description: "Keep custom branch synced with main safely"
-  default_prompt: "Use $main-first-xr-branch-sync to sync my customization branch from main while isolating custom edits in xr-prefixed files."
