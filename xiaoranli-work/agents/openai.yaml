@@ -1,0 +1,4 @@
+interface:
+  display_name: "xiaoranli-work"
+  short_description: "Update selfknowledge.md after review comments"
+  default_prompt: "Use $xiaoranli-work to process review comments and update the repo's selfknowledge.md with any genuine mistakes or knowledge gaps discovered."
