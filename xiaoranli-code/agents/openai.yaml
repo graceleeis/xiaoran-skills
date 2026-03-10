@@ -1,0 +1,4 @@
+interface:
+  display_name: "xiaoranli-code"
+  short_description: "Design service changes from invariants and boundaries first"
+  default_prompt: "Use $xiaoranli-code when changing an existing backend service feature, bugfix, or refactor in C#, Rust, or similar service code, and the work must stay aligned with invariants, boundaries, source-of-truth, and caller/callee contracts."
