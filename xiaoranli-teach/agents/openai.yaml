@@ -1,0 +1,4 @@
+interface:
+  display_name: "xiaoranli-teach"
+  short_description: "Teach code and knowledge in simple Chinese with Python-first examples"
+  default_prompt: "Use $xiaoranli-teach when the user wants to learn code or another knowledge topic, wants a beginner-friendly explanation in Chinese, or says things like 'I still don't understand', 'use another example', or 'use other examples'. Keep key terms in English, use the Feynman-style loop, and bias toward tiny Python examples before math-heavy abstraction."
