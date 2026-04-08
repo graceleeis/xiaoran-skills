@@ -16,22 +16,15 @@ UnionOfAllLogs('Vienna', 'requests')
 AzureMLFrontdoorAccessLog
 ContainerTraces_allEnvironments()
 UnionOfAllLogs('Vienna', 'AMLManagedComputeLogs')
-PodSnapshots
-KubernetesEvents
 ```
 
-Do not ask the user for cluster or database unless execution fails because `XIAORANLI_KUDA_CLUSTER_URL` or `XIAORANLI_KUDA_DATABASE` is missing. APIM tracing defaults to `https://cogsvc.kusto.windows.net` / `Platform`. Singularity tracing defaults to `https://aiscprodkusto.westus2.kusto.windows.net` / `logs`.
-
-Important environment note discovered in practice:
-- The installed `xiaoranli-kuda investigate` command still calls `load_connection_config()` even in `--apim-request-id` mode, so you usually must pass or set a main Vienna cluster/database explicitly.
-- For East US MaaS AML log investigation, prefer `--cluster-url https://viennause.kusto.windows.net --database Vienna`.
-- Do not use `https://aiscprodkusto.westus2.kusto.windows.net / logs` with `investigate --apim-request-id ...`; the generated `UnionOfAllLogs('Vienna', ...)` queries fail there.
+Do not ask the user for cluster or database unless execution fails because `XIAORANLI_KUDA_CLUSTER_URL` or `XIAORANLI_KUDA_DATABASE` is missing. Important implementation quirk: `xiaoranli-kuda investigate --apim-request-id ...` still calls `load_connection_config()` before APIM mode, so you must provide or set the backend Vienna cluster/database for the target region even when APIM tracing is the starting point. For East US backend tracing, use `--cluster-url https://viennause.kusto.windows.net --database Vienna`. APIM tracing itself still uses `https://cogsvc.kusto.windows.net` / `Platform` for the APIM half of the correlation. Singularity tracing defaults to `https://aiscprodkusto.westus2.kusto.windows.net` / `logs`. Also note that customer deployment names in the online URL often differ from backend AML `deploymentName`; correlate by APIM request id -> X-Request-ID -> backend endpoint -> AML deployment instead of assuming the names match.
 
 ## Required setup
 
 1. Confirm the CLI exists: `xiaoranli-kuda --help`
 2. Confirm Azure auth: `az login`
-3. Confirm connection env vars exist if you want defaults:
+3. Confirm connection env vars exist:
    - `XIAORANLI_KUDA_CLUSTER_URL`
    - `XIAORANLI_KUDA_DATABASE`
 4. Optional override env vars:
@@ -55,15 +48,6 @@ Trace one APIM request ID across APIM, Nexus, FrontDoor, and container logs:
 ```bash
 xiaoranli-kuda investigate \
   --apim-request-id <apim-request-id>
-```
-
-For East US APIM tracing, prefer:
-
-```bash
-xiaoranli-kuda investigate \
-  --apim-request-id <apim-request-id> \
-  --cluster-url https://viennause.kusto.windows.net \
-  --database Vienna
 ```
 
 List all containers for an endpoint and deployment:
@@ -104,104 +88,59 @@ xiaoranli-kuda logs \
 6. If the user asks for logs without a container, run `logs` without the container filter.
 7. Summarize the result directly, leading with the investigation summary when `investigate` was used.
 8. When APIM tracing is used, explain that the tool anchors the downstream search to the APIM timestamp and uses `anchor +/- 30m`.
-9. Include the returned `kustoLink`, and also `apimKustoLink` when APIM tracing was used, so the user can continue the query manually in Azure Data Explorer.
+9. If `investigate` succeeds but container rows are empty or you need the true engine-side root cause, query the regional Vienna `AMLManagedComputeLogs` table directly (not `UnionOfAllLogs`) for the correlated backend endpoint/deployment and container. This avoids cross-cluster throttling and is especially useful for `qwen-vllm-ft-sidecar` LoRA failures. Search around the exact request second for strings like the LoRA id, `/scratch/mesh/finetunes/`, `Failed to prepare LoRA directory`, `Deterministic finetune path found in cache`, and `Failed to process LoRA request`.
+10. If request tracing shows scoring/data-plane symptoms, classify them before concluding:
+   - `FrontDoor responseCodeDetails == no_healthy_upstream` or `UH`/`503` => the request likely never reached the model. Treat this as deployment/pod readiness or routing registration investigation, not a model bug.
+   - `FrontDoor responseCodeDetails == via_upstream` => the request did reach the backend. Trace by `x-request-id` through downstream logs and then inspect the target container logs.
+   - `Duration == 0` with no backend host/upstream evidence => instant rejection at the frontdoor/mesh layer.
+   - `UpCluster`/upstream cluster identifiers often encode `{InstanceId}--{DeploymentName}`; preserve these in the summary because they are the best bridge into Singularity namespace/pod debugging.
+11. If the trace points to pod health rather than model logic, pivot explicitly into Singularity-style checks instead of stopping at kuda output:
+   - inspect deployment / pod readiness state,
+   - look for recent sidecar-only restarts,
+   - check Kubernetes events for scheduling, probe, image-pull, or crash-loop signals,
+   - only then fall back to broad container log scraping.
+12. Be careful with deployment naming: customer-facing deployment names in URLs or APIM may differ from backend AML `deploymentName`. Correlate by `apim-request-id -> X-Request-ID -> backend endpoint -> FrontDoor endpointName/deploymentName -> container logs`, not by name guessing.
+13. In the final answer, always separate: symptom, deepest confirmed layer, likely root cause, and next manual query/link.
+14. Prefer the tool's structured trace output when APIM mode is used. Recent versions return `analysis.structuredSummary` with:
+   - `symptom`
+   - `correlated_path`
+   - `deepest_confirmed_layer`
+   - `likely_root_cause`
+   - `what_is_not_yet_proven`
+   - `next_query_focus`
+   Use these fields directly when available instead of re-inventing the summary format.
+15. Treat those structured fields as ownership guidance, not just formatting. For your team, the key question is whether the deepest confirmed layer is still in request routing / hosting / LoRA handling, or whether the evidence only shows a downstream Singularity landing symptom.
+16. When APIM mode points to readiness/routing health rather than model logic, also use the returned `podHealthQueries` bundle when present:
+   - `applicationSnapshotsQuery`
+   - `podSnapshotsQuery`
+   - `kubernetesEventsQuery`
+   These are downstream follow-up queries for `no_healthy_upstream`, instant rejection, and similar mesh-side failures. Use them to confirm or hand off, but do not let them overshadow team-owned hosting / LoRA investigation when direct evidence exists there.
+17. In ownership-sensitive cases, prefer this framing in the final answer:
+   - customer symptom
+   - correlated request path
+   - deepest confirmed layer
+   - likely root cause
+   - what is and is not in team ownership
+   - next team-owned query
+   - optional downstream Singularity query
+18. For LoRA and container-hosting investigations, prioritize engine-side evidence before broad Singularity triage. If AML logs or container traces show adapter/materialization failures, cache-path issues, sidecar bootstrap failures, or request-specific LoRA preparation errors, lead with those findings; treat pod health as secondary confirmation unless the trace clearly stops before hosting.
+19. Include the returned `kustoLink`, and also `apimKustoLink` when APIM tracing was used, so the user can continue the query manually in Azure Data Explorer.
 
-## LoRA / finetune debugging workflow
+## Debug heuristics to apply in summaries
 
-Use this exact order when the model error mentions LoRA, finetune, adapter loading, registry asset resolution, or `/scratch/mesh/finetunes/`.
+- Do not jump from `424` straight to "model failure". First decide whether the request was rejected before reaching the backend (`no_healthy_upstream`) or returned by the backend (`via_upstream`).
+- Prefer specific request tracing over aggregate trends when the user gives a concrete request id.
+- Treat brief bursts carefully: pod readiness flaps and sidecar restarts can create short `424`/`503` windows that may not show up clearly in coarse snapshots.
+- When logs are noisy, state the highest-confidence layer only; avoid over-claiming a root cause the trace does not prove.
+- If the tool surfaces only APIM/Nexus evidence but the user needs engine-side cause, say so explicitly and continue with direct regional AML or Singularity queries rather than stopping.
 
-1. Trace from APIM request id to the backend endpoint/deployment with `investigate`.
-2. Record all three identifiers because they differ by layer:
-   - customer deployment in the URL, e.g. `tc-tn-qwen-...`
-   - backend endpoint, e.g. `qwen-3-32b-eus-ep-m365`
-   - backend AML deployment, e.g. `dep-eus-qwen3-32b-...`
-3. Run `list-containers` for the backend endpoint/deployment.
-4. Pull broad logs first, then narrow to the likely failing container.
-   - For qwen LoRA issues, `qwen-vllm-ft-sidecar` is often the first container to check.
-   - `qwen-vllm` may show nothing if the sidecar fails before handing the request to the main server.
-5. If `xiaoranli-kuda logs` is too noisy, switch to direct Kusto on `AMLManagedComputeLogs` instead of the generated `UnionOfAllLogs(...)` query. This avoids cross-cluster throttling and lets you narrow aggressively.
-6. For LoRA failures, search for these patterns:
-   - `Failed to prepare LoRA directory`
-   - `failed to resolve registry asset`
-   - `Failed to load LoRA`
-   - the exact `rp-...` LoRA id
-   - `/scratch/mesh/finetunes/`
-7. Distinguish failure modes explicitly:
-   - `failed to resolve registry asset` => asset/registry resolution failure
-   - `Failed to prepare LoRA directory ... /scratch/mesh/finetunes/...` => local cache/directory preparation failure in the finetune sidecar
-8. Check whether the failure is isolated or systemic by querying other `rp-*` LoRAs on the same backend endpoint.
-9. Check Singularity pod state with `PodSnapshots` and `KubernetesEvents` if you need to rule out restart, mount, or node-level issues.
+## Maintenance notes for local development
 
-## Direct Kusto mode
-
-When the CLI output is insufficient, use direct Kusto queries and always return a click-through Data Explorer link.
-
-Preferred clusters/databases:
-- APIM / TraceCallResult: `https://cogsvc.kusto.windows.net` / `Platform`
-- East US Vienna / AMLManagedComputeLogs: `https://viennause.kusto.windows.net` / `Vienna`
-- Singularity pod state / pod events: `https://aiscprodkusto.westus2.kusto.windows.net` / `nexus-logs`
-
-Recommended East US LoRA query pattern:
-
-```kusto
-AMLManagedComputeLogs
-| where PreciseTimeStamp between (datetime(<start>) .. datetime(<end>))
-| where onlineEndpointName == '<endpoint>'
-| where deploymentName == '<backend-aml-deployment>'
-| where Container == 'qwen-vllm-ft-sidecar'
-| where log has '<rp-lora-id>' or log has 'Failed to prepare LoRA directory' or log has 'failed to resolve registry asset'
-| project PreciseTimeStamp, Container, log
-| order by PreciseTimeStamp asc
-```
-
-Recommended Singularity pod-state query pattern:
-
-```kusto
-PodSnapshots
-| where PreciseTimeStamp between (datetime(<start>) .. datetime(<end>))
-| where EndpointName == '<endpoint>'
-| project PreciseTimeStamp, Tenant, Name, RoleInstance, Phase, Error, PodNotReadyError, PodNotInitializedError, MainContainerRestarts, EndpointName, ComponentName
-| order by PreciseTimeStamp desc
-```
-
-Recommended Singularity Kubernetes events query pattern:
-
-```kusto
-KubernetesEvents
-| where PreciseTimeStamp between (datetime(<start>) .. datetime(<end>))
-| where InvolvedObjectName has '<deployment-id>' or PodName has '<deployment-id>'
-| where message has_any ('mount','disk','space','permission','denied','read-only','filesystem','inode','scratch','evict','oom','kill','back-off','unhealthy','failed')
-   or EventReason has_any ('FailedMount','BackOff','Unhealthy','Failed','Killing','Evicted')
-| project PreciseTimeStamp, PodName, InvolvedObjectName, ContainerName, EventType, EventReason, message, RoleInstance, AISC_NodeInstanceId
-| order by PreciseTimeStamp desc
-```
-
-## Clickable Data Explorer links
-
-Always give the user a direct Azure Data Explorer link they can open and click Run on.
-
-Base cluster links:
-- APIM: `https://dataexplorer.azure.com/clusters/cogsvc/databases/Platform`
-- East US Vienna: `https://dataexplorer.azure.com/clusters/viennause/databases/Vienna`
-- Singularity pod state: `https://dataexplorer.azure.com/clusters/aiscprodkusto/databases/nexus-logs`
-
-When using `xiaoranli-kuda`, return the tool's `kustoLink` and `apimKustoLink` verbatim.
-
-When writing manual KQL, include:
-1. the cluster/database link above
-2. the exact KQL in a fenced block immediately below it
-
-If the environment supports full encoded ADX links, prefer giving both:
-- a plain cluster link
-- and an encoded query link
-
-But do not block on generating the encoded query URL. A clickable cluster/database link plus ready-to-run KQL is acceptable.
-
-## Interpretation rules from recent incidents
-
-- If `PodSnapshots` shows workers continuously `Running`, `MainContainerRestarts == 0`, and empty `Error` / `PodNotReadyError` / `PodNotInitializedError`, the issue is probably not a pod lifecycle or mount failure.
-- If `KubernetesEvents` shows no `FailedMount`, `BackOff`, `Unhealthy`, `Evicted`, `disk`, `permission`, or `read-only` signals, a stable LoRA failure is more likely due to LoRA asset resolution or local finetune cache state than Kubernetes infrastructure.
-- If multiple request ids over time fail with the same LoRA and the same error pattern, do not call it a transient race without stronger evidence. Treat it as a deterministic asset/cache issue first.
+- The editable source for the CLI currently lives at `/home/xiaoranli/env-setup/kuda.py`.
+- When adding or changing request-trace heuristics, write focused regression tests under `/home/xiaoranli/env-setup/tests/` first. A good pattern is to call `analyze_request_trace(...)` directly with minimal synthetic APIM/Nexus/FrontDoor/container rows.
+- In this environment, `pytest` without overrides may import a different installed `kuda` module from pyenv instead of the repo copy. For local tests against source, use `PYTHONPATH=/home/xiaoranli/env-setup pytest ...` or run `/home/xiaoranli/miniconda3/bin/pytest ...` after reinstalling editable.
+- After changing `kuda.py`, refresh the CLI with `/home/xiaoranli/miniconda3/bin/pip install -e /home/xiaoranli/env-setup` and verify using `/home/xiaoranli/miniconda3/bin/python -c "import kuda; print(kuda.__file__)"`.
+- For FrontDoor diagnostics, include `responseCodeDetails`, `durationTotal`, and `durationUpstream` in evidence formatting so instant rejections vs backend failures are distinguishable in one glance.
 
 ## Example
 
@@ -229,7 +168,5 @@ Run:
 
 ```bash
 xiaoranli-kuda investigate \
-  --apim-request-id 11111111-2222-3333-4444-555555555555 \
-  --cluster-url https://viennause.kusto.windows.net \
-  --database Vienna
+  --apim-request-id 11111111-2222-3333-4444-555555555555
 ```
