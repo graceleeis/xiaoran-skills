@@ -124,7 +124,18 @@ xiaoranli-kuda logs \
    - next team-owned query
    - optional downstream Singularity query
 18. For LoRA and container-hosting investigations, prioritize engine-side evidence before broad Singularity triage. If AML logs or container traces show adapter/materialization failures, cache-path issues, sidecar bootstrap failures, or request-specific LoRA preparation errors, lead with those findings; treat pod health as secondary confirmation unless the trace clearly stops before hosting.
-19. Include the returned `kustoLink`, and also `apimKustoLink` when APIM tracing was used, so the user can continue the query manually in Azure Data Explorer.
+19. For routine checks, do not create `AI-gen/` summary files or command-log files unless the user explicitly asks for artifacts on disk.
+20. Prefer the returned query-opening links over the cluster landing links:
+   - endpoint/deployment mode: `resolveQueryLink`, `queryLink`
+   - APIM mode: `apimQueryLink`, `nexusQueryLink`, `tracesQueryLink`, `frontdoorQueryLink`, `containerQueryLink`
+   These links open Azure Data Explorer with the KQL already filled in, so the user only needs to click and run.
+21. Only fall back to `kustoLink` / `apimKustoLink` when a query-specific link is unavailable.
+22. In the final answer, include direct clickable links for the next manual step, not just pasted KQL. Preferred pattern:
+   - `Logs query: <queryLink>`
+   - `Resolve query: <resolveQueryLink>`
+   - `APIM trace: <apimQueryLink>`
+   - `Backend AML logs: <containerQueryLink>` or `<queryLink>`
+23. When the user asks whether an endpoint or deployment is busy, prefer `investigate` first to resolve the true endpoint/deployment pair, then present the exact ADX query link that reproduces the result.
 
 ## Debug heuristics to apply in summaries
 
@@ -139,7 +150,9 @@ xiaoranli-kuda logs \
 - The editable source for the CLI currently lives at `/home/xiaoranli/env-setup/kuda.py`.
 - When adding or changing request-trace heuristics, write focused regression tests under `/home/xiaoranli/env-setup/tests/` first. A good pattern is to call `analyze_request_trace(...)` directly with minimal synthetic APIM/Nexus/FrontDoor/container rows.
 - In this environment, `pytest` without overrides may import a different installed `kuda` module from pyenv instead of the repo copy. For local tests against source, use `PYTHONPATH=/home/xiaoranli/env-setup pytest ...` or run `/home/xiaoranli/miniconda3/bin/pytest ...` after reinstalling editable.
-- After changing `kuda.py`, refresh the CLI with `/home/xiaoranli/miniconda3/bin/pip install -e /home/xiaoranli/env-setup` and verify using `/home/xiaoranli/miniconda3/bin/python -c "import kuda; print(kuda.__file__)"`.
+- The interactive shell currently resolves `xiaoranli-kuda` through `/home/xiaoranli/.pyenv/shims/xiaoranli-kuda`, so after changing `kuda.py`, refresh that environment with `/home/xiaoranli/.pyenv/versions/3.12.9/bin/python -m pip install -e /home/xiaoranli/env-setup` and run `/home/xiaoranli/.pyenv/bin/pyenv rehash`.
+- If you also use the Miniconda copy directly, refresh it too with `/home/xiaoranli/miniconda3/bin/python -m pip install -e /home/xiaoranli/env-setup`.
+- Verify the active shell is loading the expected source with `python -c "import kuda; print(kuda.__file__)"` and `which -a xiaoranli-kuda`.
 - For FrontDoor diagnostics, include `responseCodeDetails`, `durationTotal`, and `durationUpstream` in evidence formatting so instant rejections vs backend failures are distinguishable in one glance.
 
 ## Example
