@@ -56,6 +56,15 @@ Follow this order:
 3. Read `docs/Automated ED Onboarding V2.md` to confirm the current request schema.
 4. Check any prior `AI-gen/*publish-result*.json` and `AI-gen/*assets-tracking*.json` files if the user is retrying.
 5. If a recent publish failed with `Customer Managed CosmosDB Firewall settings were not properly set up`, treat that as a likely platform-side incident until proven otherwise.
+6. Normalize the object shape before comparing examples:
+   - a legacy or live Nimbus `engineDefinitions` response is **not** the same object as a raw MPSS V2 request,
+   - `pipeReplicaGroups` in a live engine definition is a service-side projection,
+   - the source of truth for a V2 request is `config.assets.<template>.deployments.<deployment>.containers`.
+7. If the user is comparing a successful old VLLM engine definition against a new V2 SGLang request, fetch the live engine definition by name and compare at the same semantic layer instead of comparing `pipeReplicaGroups` directly to the raw request body.
+8. For runtime startup failures, fetch both:
+   - `assets/tracking`
+   - `assets/tracking/K8sTemplate`
+   Save them under `AI-gen/` and use them as the primary evidence for what the platform actually generated.
 
 ## Build Rules
 
@@ -88,6 +97,13 @@ Core fields:
 - `assets`
 
 For a single-engine publish, use one template asset named `default` unless there is a clear reason to split templates.
+
+In V2, container order is semantic, not cosmetic:
+- the first deployment is the primary deployment,
+- within that deployment, the first non-`cmp` container is the primary serving container,
+- external traffic lands on that primary container, or on `cmp` first if `cmp` is present.
+
+Do not reorder `inference`, `sidecar`, and `cmp` casually when porting an old working example.
 
 ### Server command handling
 
@@ -122,13 +138,15 @@ Only patch repo configs when the user explicitly asks to persist the changes in 
 4. Save:
    - request JSON,
    - latest status JSON,
-   - assets tracking JSON.
+   - assets tracking JSON,
+   - live engine definition JSON if publish succeeds.
 
 Use filenames like:
 
 ```text
 AI-gen/<model-name>-publish-result.json
 AI-gen/<model-name>-assets-tracking.json
+AI-gen/<model-name>-engine-definition-live.json
 ```
 
 ## Failure Handling
@@ -159,11 +177,58 @@ If the API rejects the request before asset creation begins, inspect:
 
 Fix only the specific payload defect and retry.
 
+### Runtime-side failure pattern
+
+If the engine definition publishes but the workload fails at startup, do not assume publish success means runtime success.
+
+Common pattern to recognize:
+- log contains `Request client_id ... is not accessible`
+- stack ends in Azure managed identity or Event Hubs auth failure
+
+Treat this as an identity-projection problem first, not an Event Hub hostname problem.
+
+Debug in this order:
+1. Fetch the live generated K8s template from the onboarding `operationId`.
+2. Compare the live `Identity` resource against the repo's intended custom template.
+3. Check whether the runtime env still requests `AZUREML_OAI_SP_CLIENT_ID`, `AZUREML_OAI_EVENT_HUB_*`, or recovery billing envs.
+4. If the repo custom template carries an extra UMI but the live generated template does not, suspect:
+   - V2 default template limitations, or
+   - a missing `customTemplate` reference in the request.
+5. Only after identity attachment is explained should you consider changing the client id or Event Hub host.
+
+Note: the `K8sTemplate` tracking endpoint can return `500 InternalError` even when the engine definition publish itself succeeded. In that case, rely on:
+- the final publish result,
+- `assets/tracking`,
+- and the live engine definition fetched from Nimbus.
+
+### No-billing functional validation pattern
+
+When the user wants to validate serving behavior without unblocking billing first, create a dedicated no-billing variant instead of mutating the main request in place.
+
+Use this pattern:
+1. Clone the working request into `AI-gen/<model-name>-no-billing-mpss-request.json`.
+2. Rename `config.modelName` to a new engine definition name.
+3. Set:
+   - `AZUREML_ROMA_DISABLE_BILLING_EVENTS=true`
+   - `AZUREML_ROMA_ENABLE_CONTENT_SAFETY_BILLING=false`
+4. Remove billing-entry envs that can still trigger startup auth on broken identities:
+   - `AZUREML_OAI_SP_CLIENT_ID`
+   - `AZUREML_OAI_EVENT_HUB_HOSTNAME`
+   - `AZUREML_OAI_EVENT_HUB_NAME`
+   - `AZUREML_OAI_DEPLOYMENT_NAME`
+   - `AZUREML_OAI_DEPLOYMENTS`
+   - `AZUREML_OAI_ROMA_RECOVERY_BILLING_SKU_NAME`
+   - `AZUREML_OAI_ROMA_RECOVERY_BILLING_REGION`
+5. Publish the no-billing variant and save request, result, tracking, and live engine definition files under `AI-gen/`.
+
+Use this only for functional validation or debugging. Do not silently replace the billing-enabled mainline configuration with the no-billing variant.
+
 ## Output to the User
 
 Always close with:
 - final status,
 - `operationId`,
+- `engineDefinitionId` and version if creation succeeded,
 - concise diagnosis,
 - clickable links to the request, result, and tracking files,
 - exact rerun command if the operation is still running or failed.
@@ -183,4 +248,3 @@ Common decisions:
 - modern Nimbus shape present -> MPSS V2
 - `ft` mentioned -> require `ft sidecar docker image`
 - same platform 403 seen elsewhere -> retry once before changing config
-
